@@ -1,6 +1,6 @@
 # 🏎️ Formula 1 MCP & Enhanced Agent
 
-A comprehensive Formula 1 data solution featuring both a basic MCP server and an enhanced AI agent powered by [Mastra](https://mastra.ai/). Get race results, podium winners, and advanced F1 analysis directly in your LLM applications!
+A comprehensive Formula 1 data solution featuring both a basic MCP server and an enhanced AI agent powered by [Mastra](https://mastra.ai/). Get race results, podium winners, and advanced F1 analysis directly in your LLM applications! Disclaimer: User must install node-modules in their own environment~
 
 ## 🚀 Two Approaches Available
 
