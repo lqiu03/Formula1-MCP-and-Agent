@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "formula1": {
+      "command": "/Users/lucasqiu/.nvm/versions/node/v20.19.4/bin/node",
+      "args": ["/Users/lucasqiu/Desktop/Formula1-MCP/build/index.js"]
+    },
+    "formula1-enhanced": {
+      "command": "/Users/lucasqiu/.nvm/versions/node/v20.19.4/bin/node",
+      "args": ["/Users/lucasqiu/Desktop/Formula1-MCP/build/mastra-mcp-server.js"]
+    }
+  }
+}
