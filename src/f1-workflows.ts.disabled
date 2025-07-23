@@ -1,0 +1,369 @@
+/**
+ * Formula 1 Analysis Workflows
+ * Complex multi-step F1 analysis using Mastra workflows
+ */
+
+import { Workflow } from "@mastra/core/workflow";
+import { openai } from "@ai-sdk/openai";
+import { OpenF1Client } from "./openf1-client.js";
+
+const openF1Client = new OpenF1Client();
+
+// Comprehensive Season Analysis Workflow
+export const seasonAnalysisWorkflow = new Workflow({
+  name: "F1 Season Analysis",
+  triggerSchema: {
+    season: { type: "number" },
+    focusTeam: { type: "string", optional: true },
+    focusDriver: { type: "string", optional: true },
+  }
+})
+.step("getRaces", {
+  inputSchema: {
+    season: { type: "number" }
+  },
+  handler: async ({ season }) => {
+    const meetings = await openF1Client.getMeetings(season);
+    return {
+      meetings,
+      totalRaces: meetings.length,
+      seasonInfo: `${season} F1 Season with ${meetings.length} races`
+    };
+  }
+})
+.then("analyzeResults", {
+  inputSchema: {
+    meetings: { type: "array" },
+    focusTeam: { type: "string", optional: true },
+    focusDriver: { type: "string", optional: true }
+  },
+  handler: async ({ meetings, focusTeam, focusDriver }) => {
+    const raceResults = [];
+    const driverStats = new Map();
+    const teamStats = new Map();
+    
+    for (const meeting of meetings) {
+      const raceSession = await openF1Client.getRaceSession(meeting.meeting_key);
+      if (!raceSession) continue;
+      
+      const results = await openF1Client.getRaceResults(raceSession.session_key);
+      raceResults.push({
+        race: meeting.meeting_name,
+        date: meeting.date_start,
+        results: results.slice(0, 10) // Top 10
+      });
+      
+      // Accumulate driver and team stats
+      results.forEach((result, index) => {
+        const driverKey = result.driver.full_name;
+        const teamKey = result.driver.team_name;
+        
+        if (!driverStats.has(driverKey)) {
+          driverStats.set(driverKey, { points: 0, wins: 0, podiums: 0, races: 0 });
+        }
+        if (!teamStats.has(teamKey)) {
+          teamStats.set(teamKey, { points: 0, wins: 0, podiums: 0 });
+        }
+        
+        const points = result.position <= 10 ? 
+          [25, 18, 15, 12, 10, 8, 6, 4, 2, 1][result.position - 1] || 0 : 0;
+        
+        const driverStat = driverStats.get(driverKey)!;
+        const teamStat = teamStats.get(teamKey)!;
+        
+        driverStat.points += points;
+        driverStat.races += 1;
+        teamStat.points += points;
+        
+        if (result.position === 1) {
+          driverStat.wins += 1;
+          teamStat.wins += 1;
+        }
+        if (result.position <= 3) {
+          driverStat.podiums += 1;
+          teamStat.podiums += 1;
+        }
+      });
+    }
+    
+    return {
+      raceResults,
+      driverStats: Object.fromEntries(driverStats),
+      teamStats: Object.fromEntries(teamStats),
+      focusTeam,
+      focusDriver
+    };
+  }
+})
+.then("generateInsights", {
+  inputSchema: {
+    driverStats: { type: "object" },
+    teamStats: { type: "object" },
+    raceResults: { type: "array" },
+    focusTeam: { type: "string", optional: true },
+    focusDriver: { type: "string", optional: true }
+  },
+  handler: async ({ driverStats, teamStats, raceResults, focusTeam, focusDriver }) => {
+    // Use LLM to generate insights
+    const model = openai("gpt-4o-mini");
+    
+    const prompt = `
+      Analyze this F1 season data and provide comprehensive insights:
+      
+      Driver Statistics: ${JSON.stringify(driverStats, null, 2)}
+      Team Statistics: ${JSON.stringify(teamStats, null, 2)}
+      Total Races: ${raceResults.length}
+      
+      ${focusTeam ? `Focus on team: ${focusTeam}` : ""}
+      ${focusDriver ? `Focus on driver: ${focusDriver}` : ""}
+      
+      Provide:
+      1. Championship standings (top 5 drivers and teams)
+      2. Key trends and surprises
+      3. Performance analysis
+      4. Notable achievements
+      5. Racing highlights
+      
+      Format with emojis and clear sections.
+    `;
+    
+    const response = await model.generateText({ prompt });
+    
+    return {
+      insights: response.text,
+      championshipStandings: {
+        drivers: Object.entries(driverStats)
+          .sort(([,a], [,b]) => (b as any).points - (a as any).points)
+          .slice(0, 5),
+        teams: Object.entries(teamStats)
+          .sort(([,a], [,b]) => (b as any).points - (a as any).points)
+          .slice(0, 5)
+      }
+    };
+  }
+})
+.commit();
+
+// Head-to-Head Driver Comparison Workflow
+export const driverComparisonWorkflow = new Workflow({
+  name: "Driver Head-to-Head Analysis",
+  triggerSchema: {
+    driver1: { type: "string" },
+    driver2: { type: "string" },
+    season: { type: "number" },
+    includeQualifying: { type: "boolean", optional: true }
+  }
+})
+.step("getDriverData", {
+  inputSchema: {
+    driver1: { type: "string" },
+    driver2: { type: "string" },
+    season: { type: "number" }
+  },
+  handler: async ({ driver1, driver2, season }) => {
+    const meetings = await openF1Client.getMeetings(season);
+    const comparisonData = [];
+    
+    for (const meeting of meetings) {
+      const raceSession = await openF1Client.getRaceSession(meeting.meeting_key);
+      if (!raceSession) continue;
+      
+      const results = await openF1Client.getRaceResults(raceSession.session_key);
+      
+      const d1Result = results.find(r => 
+        r.driver.full_name.toLowerCase().includes(driver1.toLowerCase()) ||
+        r.driver.last_name.toLowerCase().includes(driver1.toLowerCase())
+      );
+      
+      const d2Result = results.find(r => 
+        r.driver.full_name.toLowerCase().includes(driver2.toLowerCase()) ||
+        r.driver.last_name.toLowerCase().includes(driver2.toLowerCase())
+      );
+      
+      if (d1Result && d2Result) {
+        comparisonData.push({
+          race: meeting.meeting_name,
+          date: meeting.date_start,
+          driver1: {
+            position: d1Result.position,
+            driver: d1Result.driver
+          },
+          driver2: {
+            position: d2Result.position,
+            driver: d2Result.driver
+          }
+        });
+      }
+    }
+    
+    return { comparisonData, driver1, driver2 };
+  }
+})
+.then("analyzeComparison", {
+  inputSchema: {
+    comparisonData: { type: "array" },
+    driver1: { type: "string" },
+    driver2: { type: "string" }
+  },
+  handler: async ({ comparisonData, driver1, driver2 }) => {
+    const stats = {
+      driver1: { wins: 0, podiums: 0, points: 0, betterFinishes: 0 },
+      driver2: { wins: 0, podiums: 0, points: 0, betterFinishes: 0 }
+    };
+    
+    comparisonData.forEach(race => {
+      // Driver 1 stats
+      const d1Points = race.driver1.position <= 10 ? 
+        [25, 18, 15, 12, 10, 8, 6, 4, 2, 1][race.driver1.position - 1] || 0 : 0;
+      stats.driver1.points += d1Points;
+      if (race.driver1.position === 1) stats.driver1.wins++;
+      if (race.driver1.position <= 3) stats.driver1.podiums++;
+      
+      // Driver 2 stats
+      const d2Points = race.driver2.position <= 10 ? 
+        [25, 18, 15, 12, 10, 8, 6, 4, 2, 1][race.driver2.position - 1] || 0 : 0;
+      stats.driver2.points += d2Points;
+      if (race.driver2.position === 1) stats.driver2.wins++;
+      if (race.driver2.position <= 3) stats.driver2.podiums++;
+      
+      // Head-to-head
+      if (race.driver1.position < race.driver2.position) {
+        stats.driver1.betterFinishes++;
+      } else if (race.driver2.position < race.driver1.position) {
+        stats.driver2.betterFinishes++;
+      }
+    });
+    
+    return { stats, comparisonData };
+  }
+})
+.then("generateComparisonReport", {
+  inputSchema: {
+    stats: { type: "object" },
+    comparisonData: { type: "array" },
+    driver1: { type: "string" },
+    driver2: { type: "string" }
+  },
+  handler: async ({ stats, comparisonData, driver1, driver2 }) => {
+    const model = openai("gpt-4o-mini");
+    
+    const prompt = `
+      Create a comprehensive head-to-head analysis between ${driver1} and ${driver2}:
+      
+      Statistics:
+      ${driver1}: ${JSON.stringify(stats.driver1, null, 2)}
+      ${driver2}: ${JSON.stringify(stats.driver2, null, 2)}
+      
+      Race-by-race data: ${JSON.stringify(comparisonData, null, 2)}
+      
+      Provide:
+      1. Overall comparison summary
+      2. Key strengths of each driver
+      3. Notable performances
+      4. Head-to-head verdict
+      5. Context about their rivalry/competition
+      
+      Use F1 racing terminology and emojis. Be insightful and detailed.
+    `;
+    
+    const response = await model.generateText({ prompt });
+    
+    return {
+      report: response.text,
+      summary: {
+        totalRaces: comparisonData.length,
+        headToHead: `${stats.driver1.betterFinishes} - ${stats.driver2.betterFinishes}`,
+        pointsDifference: stats.driver1.points - stats.driver2.points
+      }
+    };
+  }
+})
+.commit();
+
+// Race Weekend Analysis Workflow
+export const raceWeekendWorkflow = new Workflow({
+  name: "Complete Race Weekend Analysis", 
+  triggerSchema: {
+    year: { type: "number" },
+    location: { type: "string" },
+    includeWeather: { type: "boolean", optional: true }
+  }
+})
+.step("getRaceData", {
+  inputSchema: {
+    year: { type: "number" },
+    location: { type: "string" }
+  },
+  handler: async ({ year, location }) => {
+    const meetings = await openF1Client.getMeetings(year, location);
+    if (meetings.length === 0) {
+      throw new Error(`No race found for ${location} ${year}`);
+    }
+    
+    const meeting = meetings[0];
+    const sessions = await openF1Client.getSessions(meeting.meeting_key);
+    
+    return { meeting, sessions };
+  }
+})
+.then("analyzeAllSessions", {
+  inputSchema: {
+    meeting: { type: "object" },
+    sessions: { type: "array" }
+  },
+  handler: async ({ meeting, sessions }) => {
+    const sessionAnalysis = [];
+    
+    for (const session of sessions) {
+      if (session.session_type === 'Race') {
+        const results = await openF1Client.getRaceResults(session.session_key);
+        sessionAnalysis.push({
+          type: 'Race',
+          results: results.slice(0, 10),
+          podium: results.slice(0, 3)
+        });
+      }
+      // Note: Could add qualifying and practice session analysis here
+    }
+    
+    return { meeting, sessionAnalysis };
+  }
+})
+.then("generateWeekendReport", {
+  inputSchema: {
+    meeting: { type: "object" },
+    sessionAnalysis: { type: "array" }
+  },
+  handler: async ({ meeting, sessionAnalysis }) => {
+    const model = openai("gpt-4o-mini");
+    
+    const prompt = `
+      Create a complete race weekend report for ${(meeting as any).meeting_name}:
+      
+      Circuit: ${(meeting as any).circuit_short_name}
+      Location: ${(meeting as any).location}
+      Date: ${(meeting as any).date_start}
+      
+      Session Analysis: ${JSON.stringify(sessionAnalysis, null, 2)}
+      
+      Provide:
+      1. Weekend overview
+      2. Key storylines
+      3. Performance highlights
+      4. Strategic insights
+      5. Technical observations
+      6. Championship implications
+      
+      Write in the style of an F1 race report with emojis and technical detail.
+    `;
+    
+    const response = await model.generateText({ prompt });
+    
+    return {
+      report: response.text,
+      weekend: meeting,
+      sessions: sessionAnalysis
+    };
+  }
+})
+.commit(); 
