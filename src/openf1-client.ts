@@ -4,6 +4,12 @@
  */
 
 const OPENF1_BASE_URL = 'https://api.openf1.org/v1';
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes cache for F1 data
+
+interface CacheEntry<T> {
+  data: T[];
+  timestamp: number;
+}
 
 export interface Meeting {
   circuit_key: number;
@@ -56,7 +62,28 @@ export interface Driver {
 }
 
 export class OpenF1Client {
+  private cache = new Map<string, CacheEntry<any>>();
+
+  private generateCacheKey(endpoint: string, params: Record<string, any>): string {
+    const sortedParams = Object.keys(params)
+      .sort()
+      .map(key => `${key}=${params[key]}`)
+      .join('&');
+    return `${endpoint}?${sortedParams}`;
+  }
+
+  private isValidCacheEntry<T>(entry: CacheEntry<T>): boolean {
+    return Date.now() - entry.timestamp < CACHE_TTL_MS;
+  }
+
   private async fetchData<T>(endpoint: string, params: Record<string, any> = {}): Promise<T[]> {
+    const cacheKey = this.generateCacheKey(endpoint, params);
+    const cachedEntry = this.cache.get(cacheKey);
+    
+    if (cachedEntry && this.isValidCacheEntry(cachedEntry)) {
+      return cachedEntry.data as T[];
+    }
+
     const url = new URL(`${OPENF1_BASE_URL}/${endpoint}`);
     
     // Add query parameters
@@ -73,7 +100,14 @@ export class OpenF1Client {
       }
       
       const data = await response.json();
-      return Array.isArray(data) ? data : [data];
+      const result = Array.isArray(data) ? data : [data];
+      
+      this.cache.set(cacheKey, {
+        data: result,
+        timestamp: Date.now()
+      });
+      
+      return result;
     } catch (error) {
       throw new Error(`Failed to fetch from OpenF1: ${error}`);
     }
@@ -83,26 +117,25 @@ export class OpenF1Client {
    * Get meetings (race weekends) by year and optionally filter by location
    */
   async getMeetings(year: number, location?: string): Promise<Meeting[]> {
-    const params: Record<string, any> = { year };
+    const allMeetings = await this.fetchData<Meeting>('meetings', { year });
     
-    if (location) {
-      // Try to match location case-insensitively
-      params.location = location;
+    if (!location) {
+      return allMeetings;
     }
     
-    const meetings = await this.fetchData<Meeting>('meetings', params);
+    const exactMatches = allMeetings.filter(meeting => 
+      meeting.location.toLowerCase() === location.toLowerCase()
+    );
     
-    // If location was provided but no exact match, try fuzzy matching
-    if (location && meetings.length === 0) {
-      const allMeetings = await this.fetchData<Meeting>('meetings', { year });
-      return allMeetings.filter(meeting => 
-        meeting.location.toLowerCase().includes(location.toLowerCase()) ||
-        meeting.meeting_name.toLowerCase().includes(location.toLowerCase()) ||
-        meeting.circuit_short_name.toLowerCase().includes(location.toLowerCase())
-      );
+    if (exactMatches.length > 0) {
+      return exactMatches;
     }
     
-    return meetings;
+    return allMeetings.filter(meeting => 
+      meeting.location.toLowerCase().includes(location.toLowerCase()) ||
+      meeting.meeting_name.toLowerCase().includes(location.toLowerCase()) ||
+      meeting.circuit_short_name.toLowerCase().includes(location.toLowerCase())
+    );
   }
 
   /**
@@ -195,4 +228,4 @@ export class OpenF1Client {
       return null;
     }
   }
-} 
+}  
